@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type { CollectPoint, SporeColor, SporePrint } from '@/types'
 import { SPORE_COLORS } from '@/types'
-import GeoPointForm from '@/components/common/GeoPointForm.vue'
+import PointBaseForm from '@/components/common/PointBaseForm.vue'
 import GillAttachmentTag from '@/components/common/GillAttachmentTag.vue'
 import SporePrintSwatch from '@/components/common/SporePrintSwatch.vue'
 import TraitsSummary from '@/components/common/TraitsSummary.vue'
@@ -12,8 +12,10 @@ import { useStore } from '@/hooks/usePersistentStore'
 import { recordStore } from '@/stores/recordStore'
 import { sporeStore } from '@/stores/sporeStore'
 import { pointStore } from '@/stores/pointStore'
+import { readingStore } from '@/stores/readingStore'
 import { identifyStore } from '@/stores/identifyStore'
 import { sporeColorHex } from '@/utils/spore'
+import { adoptedCoordText, adoptedFromText, pointCoordStatus } from '@/utils/geo'
 import { uid } from '@/utils/id'
 
 const route = useRoute()
@@ -21,6 +23,7 @@ const router = useRouter()
 const recordState = useStore(recordStore)
 const sporeState = useStore(sporeStore)
 const pointState = useStore(pointStore)
+const readingState = useStore(readingStore)
 const identifyState = useStore(identifyStore)
 
 const record = computed(() => recordState.records.find((item) => item.id === route.params.id) ?? null)
@@ -32,6 +35,10 @@ const recordPointName = computed(() => {
   if (!current) return '未关联'
   return pointState.points.find((item) => item.id === current.pointId)?.name ?? '未关联'
 })
+/** 当前条目关联的采集点 */
+const linkedPoint = computed(
+  () => pointState.points.find((item) => item.id === record.value?.pointId) ?? null
+)
 
 const sporeForm = reactive({
   id: '',
@@ -45,9 +52,12 @@ const sporeForm = reactive({
 const pointDraft = reactive<CollectPoint>({
   id: '',
   name: '',
-  longitude: 0,
-  latitude: 0,
-  altitude: 0,
+  adoptedLongitude: null,
+  adoptedLatitude: null,
+  adoptedAltitude: null,
+  adoptedFrom: null,
+  siteNote: '',
+  pendingReadopt: false,
   vegetation: '针阔混交林',
   substrate: '落叶层',
   companionTrees: '',
@@ -184,11 +194,32 @@ async function removeSpore(): Promise<void> {
       </el-card>
 
       <el-card shadow="never" class="block">
-        <template #header>采集点信息（含经纬度校验）</template>
-        <GeoPointForm v-model="pointDraft" with-meta />
-        <div class="form-actions">
-          <el-button type="primary" @click="savePoint">保存采集点</el-button>
-        </div>
+        <template #header>
+          <div class="block-head">
+            <span>采集点信息</span>
+            <el-tag v-if="linkedPoint" size="small" effect="dark"
+              :type="pointCoordStatus(linkedPoint) === '已采用' ? 'success' : pointCoordStatus(linkedPoint) === '待重新采用' ? 'warning' : 'info'"
+            >
+              {{ pointCoordStatus(linkedPoint) }}
+            </el-tag>
+          </div>
+        </template>
+        <template v-if="linkedPoint">
+          <p class="adopted-line">
+            采用坐标：<b>{{ adoptedCoordText(linkedPoint) }}</b>
+            <span class="muted">（{{ adoptedFromText(linkedPoint, readingState.readings) }}）</span>
+          </p>
+          <p v-if="linkedPoint.siteNote" class="note">点位说明：{{ linkedPoint.siteNote }}</p>
+          <p class="muted coord-hint">
+            坐标读数与采用在「采集点管理」页两边分管；此处只维护基本信息，保存不影响采用坐标与点位说明。
+          </p>
+          <PointBaseForm v-model="pointDraft" with-meta />
+          <div class="form-actions">
+            <el-button type="primary" @click="savePoint">保存采集点信息</el-button>
+            <el-button @click="router.push('/points')">去管理坐标</el-button>
+          </div>
+        </template>
+        <el-empty v-else description="该条目未关联采集点" />
       </el-card>
 
       <el-card shadow="never" class="block">
@@ -238,6 +269,13 @@ async function removeSpore(): Promise<void> {
   background: #f7f5f0;
   font-size: 12px;
   color: #6f7d72;
+}
+.adopted-line {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+.coord-hint {
+  margin: 0 0 10px;
 }
 .spore-body {
   display: flex;

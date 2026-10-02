@@ -5,6 +5,7 @@ import { useStore } from '@/hooks/usePersistentStore'
 import { recordStore } from '@/stores/recordStore'
 import { sporeStore } from '@/stores/sporeStore'
 import { pointStore } from '@/stores/pointStore'
+import { readingStore } from '@/stores/readingStore'
 import { identifyStore } from '@/stores/identifyStore'
 
 const route = useRoute()
@@ -33,6 +34,7 @@ onMounted(async () => {
   await recordStore.getState().hydrate()
   await sporeStore.getState().hydrate()
   await pointStore.getState().hydrate()
+  await readingStore.getState().hydrate()
   await identifyStore.getState().hydrate()
 })
 </script>

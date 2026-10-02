@@ -1,22 +1,31 @@
 import { onUnmounted, reactive } from 'vue'
 import type { StoreApi } from 'zustand/vanilla'
 import Dexie, { type Table } from 'dexie'
-import type { CollectPoint, FungusRecord, IdentifyLog, SporePrint } from '@/types'
+import { LEGACY_COORD_SOURCE } from '@/types'
+import type { CollectPoint, CoordReading, FungusRecord, IdentifyLog, SporePrint } from '@/types'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
   value: number
 }
 
-/** Dexie 封装：条目 / 孢子印 / 采集点 / 鉴定结论 四张表 + 元数据表 */
+/** v3 之前的采集点：坐标是单一值，未分来源 */
+type LegacyCollectPoint = CollectPoint & {
+  longitude?: number
+  latitude?: number
+  altitude?: number
+}
+
+/** Dexie 封装：条目 / 孢子印 / 采集点 / 鉴定结论 / 坐标读数 五张表 + 元数据表 */
 class FungiGuideDb extends Dexie {
   records!: Table<FungusRecord, string>
   spores!: Table<SporePrint, string>
   points!: Table<CollectPoint, string>
   identifies!: Table<IdentifyLog, string>
+  readings!: Table<CoordReading, string>
   meta!: Table<MetaRow, string>
 
   constructor() {
@@ -29,7 +38,7 @@ class FungiGuideDb extends Dexie {
       meta: 'key'
     })
     // v2：新增「菌肉变色反应」字段，迁移时为历史条目补齐默认值（不变色）
-    this.version(SCHEMA_VERSION)
+    this.version(2)
       .stores({
         records: 'id, code, pointId, attachment, capShape',
         spores: 'id, recordId, color, observeDate',
@@ -46,6 +55,61 @@ class FungiGuideDb extends Dexie {
               record.fleshReaction = '不变色'
             }
           })
+      })
+    // v3：坐标拆成「野外组读数 / 整理组采用坐标」两侧。
+    // 历史坐标没分过来源，先当作野外组读数回填（来源标记「历史回填」），
+    // 同时保留为采用坐标，保证升级前后统计口径一致。
+    this.version(SCHEMA_VERSION)
+      .stores({
+        records: 'id, code, pointId, attachment, capShape',
+        spores: 'id, recordId, color, observeDate',
+        points: 'id, name, substrate, vegetation',
+        identifies: 'id, recordId, conclusion, date',
+        readings: 'id, pointId, source',
+        meta: 'key'
+      })
+      .upgrade(async (tx) => {
+        const pointsTable = tx.table<LegacyCollectPoint, string>('points')
+        const readingsTable = tx.table<CoordReading, string>('readings')
+        const legacyPoints = await pointsTable.toArray()
+        const today = new Date().toISOString().slice(0, 10)
+        const backfill: CoordReading[] = []
+        legacyPoints.forEach((point) => {
+          const hasCoord =
+            typeof point.longitude === 'number' &&
+            typeof point.latitude === 'number' &&
+            !(point.longitude === 0 && point.latitude === 0)
+          if (hasCoord) {
+            const reading: CoordReading = {
+              id: `rdg_legacy_${point.id}`,
+              pointId: point.id,
+              source: LEGACY_COORD_SOURCE,
+              longitude: point.longitude as number,
+              latitude: point.latitude as number,
+              altitude: typeof point.altitude === 'number' ? point.altitude : 0,
+              reader: point.collector ?? '',
+              readAt: point.collectDate || today,
+              note: '升级回填：v3 前未分来源的历史坐标'
+            }
+            backfill.push(reading)
+            point.adoptedLongitude = reading.longitude
+            point.adoptedLatitude = reading.latitude
+            point.adoptedAltitude = reading.altitude
+            point.adoptedFrom = reading.id
+          } else {
+            point.adoptedLongitude = null
+            point.adoptedLatitude = null
+            point.adoptedAltitude = null
+            point.adoptedFrom = null
+          }
+          point.siteNote = typeof point.siteNote === 'string' ? point.siteNote : ''
+          point.pendingReadopt = false
+          delete point.longitude
+          delete point.latitude
+          delete point.altitude
+        })
+        await readingsTable.bulkPut(backfill)
+        await pointsTable.bulkPut(legacyPoints)
       })
   }
 }
@@ -93,9 +157,12 @@ export async function seedDemoData(): Promise<void> {
     {
       id: 'pt_bhs',
       name: '百花山栎树林样线',
-      longitude: 115.6218,
-      latitude: 39.8152,
-      altitude: 1420,
+      adoptedLongitude: 115.6218,
+      adoptedLatitude: 39.8152,
+      adoptedAltitude: 1420,
+      adoptedFrom: 'rdg_bhs_gps',
+      siteNote: '样线起点在栎树林北侧路口，沿等高线向西约 200 m。',
+      pendingReadopt: false,
       vegetation: '针阔混交林',
       substrate: '落叶层',
       companionTrees: '辽东栎、油松',
@@ -105,14 +172,64 @@ export async function seedDemoData(): Promise<void> {
     {
       id: 'pt_yls',
       name: '云龙山腐木沟',
-      longitude: 117.2841,
-      latitude: 34.2615,
-      altitude: 260,
+      adoptedLongitude: 117.2841,
+      adoptedLatitude: 34.2615,
+      adoptedAltitude: 260,
+      adoptedFrom: 'rdg_yls_guide',
+      siteNote: '沟口石桥上行约 300 m，腐木集中在沟谷阴坡。',
+      pendingReadopt: true,
       vegetation: '常绿阔叶林',
       substrate: '腐木',
       companionTrees: '麻栎、枫香',
       collectDate: today,
       collector: '沈禾'
+    }
+  ])
+
+  await db.readings.bulkPut([
+    {
+      id: 'rdg_bhs_gps',
+      pointId: 'pt_bhs',
+      source: '定位仪读数',
+      longitude: 115.6218,
+      latitude: 39.8152,
+      altitude: 1420,
+      reader: '沈禾',
+      readAt: today,
+      note: '定位仪定点，信号稳定'
+    },
+    {
+      id: 'rdg_bhs_map',
+      pointId: 'pt_bhs',
+      source: '地图描点',
+      longitude: 115.623,
+      latitude: 39.8146,
+      altitude: 1405,
+      reader: '祁野',
+      readAt: today,
+      note: '按 1:5 万地形图描点，与定位仪读数偏差待裁定'
+    },
+    {
+      id: 'rdg_yls_guide',
+      pointId: 'pt_yls',
+      source: '向导口述',
+      longitude: 117.2841,
+      latitude: 34.2615,
+      altitude: 260,
+      reader: '老周（向导）',
+      readAt: today,
+      note: '向导按地形口述，图上落点'
+    },
+    {
+      id: 'rdg_yls_gps',
+      pointId: 'pt_yls',
+      source: '定位仪读数',
+      longitude: 117.2852,
+      latitude: 34.2621,
+      altitude: 274,
+      reader: '沈禾',
+      readAt: today,
+      note: '整理组采用后补录的定位仪复测，待重新采用'
     }
   ])
 
