@@ -21,7 +21,14 @@ export type {
 } from './record'
 export { SPORE_COLORS } from './spore'
 export type { SporePrint, SporeColor } from './spore'
-export { VEGETATIONS, SUBSTRATES } from './point'
-export type { CollectPoint, Vegetation, Substrate } from './point'
+export { VEGETATIONS, SUBSTRATES, READING_SOURCES } from './point'
+export type {
+  CollectPoint,
+  Vegetation,
+  Substrate,
+  FieldReading,
+  ReadingSource,
+  AdoptStatus
+} from './point'
 export { ID_BASES, ID_CONFIDENCES } from './identify'
 export type { IdentifyLog, IdBasis, IdConfidence } from './identify'

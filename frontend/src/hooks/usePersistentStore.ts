@@ -2,13 +2,21 @@ import { onUnmounted, reactive } from 'vue'
 import type { StoreApi } from 'zustand/vanilla'
 import Dexie, { type Table } from 'dexie'
 import type { CollectPoint, FungusRecord, IdentifyLog, SporePrint } from '@/types'
+import { uid } from '@/utils/id'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
   value: number
+}
+
+/** 升级前的采集点：坐标为扁平单值（v2 及以前，未分来源） */
+type LegacyPoint = CollectPoint & {
+  longitude?: number
+  latitude?: number
+  altitude?: number
 }
 
 /** Dexie 封装：条目 / 孢子印 / 采集点 / 鉴定结论 四张表 + 元数据表 */
@@ -29,7 +37,7 @@ class FungiGuideDb extends Dexie {
       meta: 'key'
     })
     // v2：新增「菌肉变色反应」字段，迁移时为历史条目补齐默认值（不变色）
-    this.version(SCHEMA_VERSION)
+    this.version(2)
       .stores({
         records: 'id, code, pointId, attachment, capShape',
         spores: 'id, recordId, color, observeDate',
@@ -45,6 +53,42 @@ class FungiGuideDb extends Dexie {
             if (!record.fleshReaction) {
               record.fleshReaction = '不变色'
             }
+          })
+      })
+    // v3：采集点坐标拆两边——野外组各来源原始读数 + 整理组采用坐标/点位说明。
+    // 升级前没分过来源，先把现有坐标当作野外组读数回填，采用坐标照这份回填。
+    this.version(SCHEMA_VERSION)
+      .stores({
+        records: 'id, code, pointId, attachment, capShape',
+        spores: 'id, recordId, color, observeDate',
+        points: 'id, name, substrate, vegetation',
+        identifies: 'id, recordId, conclusion, date',
+        meta: 'key'
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table<CollectPoint, string>('points')
+          .toCollection()
+          .modify((point: LegacyPoint) => {
+            if (Array.isArray(point.readings)) return
+            const reading = {
+              id: uid('frd'),
+              source: '历史回填',
+              longitude: point.longitude ?? 0,
+              latitude: point.latitude ?? 0,
+              altitude: point.altitude ?? 0,
+              recordedAt: point.collectDate ?? '',
+              note: '升级前未分来源，现有坐标按野外组读数回填'
+            }
+            point.readings = [reading]
+            point.adoptedLongitude = point.longitude ?? null
+            point.adoptedLatitude = point.latitude ?? null
+            point.adoptedAltitude = point.altitude ?? null
+            point.adoptedReadingsCount = 1
+            point.locationNote = point.locationNote ?? ''
+            delete point.longitude
+            delete point.latitude
+            delete point.altitude
           })
       })
   }
@@ -65,6 +109,30 @@ export async function syncAll<T extends object>(table: Table<T, string>): Promis
 /** 写入一条记录 */
 export async function syncPut<T extends object>(table: Table<T, string>, row: T): Promise<void> {
   await table.put(row)
+}
+
+/**
+ * 写入一条记录，失败时按本侧重试（整理组保存失败后，用同一份本地数据重提）。
+ * 超过重试次数仍失败则抛出，由调用方提示。
+ */
+export async function retryPut<T extends object>(
+  table: Table<T, string>,
+  row: T,
+  retries = 3
+): Promise<void> {
+  let lastErr: unknown
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      await table.put(row)
+      return
+    } catch (err) {
+      lastErr = err
+      if (attempt < retries) {
+        await new Promise((resolve) => setTimeout(resolve, 200 * (attempt + 1)))
+      }
+    }
+  }
+  throw lastErr
 }
 
 /** 删除一条记录 */
@@ -93,26 +161,61 @@ export async function seedDemoData(): Promise<void> {
     {
       id: 'pt_bhs',
       name: '百花山栎树林样线',
-      longitude: 115.6218,
-      latitude: 39.8152,
-      altitude: 1420,
       vegetation: '针阔混交林',
       substrate: '落叶层',
       companionTrees: '辽东栎、油松',
       collectDate: today,
-      collector: '沈禾'
+      collector: '沈禾',
+      locationNote: '样线沿沟谷西侧栎林，入口处有孤立木',
+      adoptedLongitude: 115.6218,
+      adoptedLatitude: 39.8152,
+      adoptedAltitude: 1420,
+      adoptedReadingsCount: 2,
+      readings: [
+        {
+          id: uid('frd'),
+          source: '定位仪',
+          longitude: 115.6218,
+          latitude: 39.8152,
+          altitude: 1420,
+          recordedAt: today,
+          note: 'GPS 信号良好'
+        },
+        {
+          id: uid('frd'),
+          source: '地图',
+          longitude: 115.6205,
+          latitude: 39.816,
+          altitude: 1410,
+          recordedAt: today,
+          note: '照地形图描点'
+        }
+      ]
     },
     {
       id: 'pt_yls',
       name: '云龙山腐木沟',
-      longitude: 117.2841,
-      latitude: 34.2615,
-      altitude: 260,
       vegetation: '常绿阔叶林',
       substrate: '腐木',
       companionTrees: '麻栎、枫香',
       collectDate: today,
-      collector: '沈禾'
+      collector: '沈禾',
+      locationNote: '沟内倒木多，沿溪行进',
+      adoptedLongitude: 117.2841,
+      adoptedLatitude: 34.2615,
+      adoptedAltitude: 260,
+      adoptedReadingsCount: 1,
+      readings: [
+        {
+          id: uid('frd'),
+          source: '定位仪',
+          longitude: 117.2841,
+          latitude: 34.2615,
+          altitude: 260,
+          recordedAt: today,
+          note: ''
+        }
+      ]
     }
   ])
 

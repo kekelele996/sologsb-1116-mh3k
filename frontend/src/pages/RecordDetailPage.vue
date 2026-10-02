@@ -2,9 +2,8 @@
 import { computed, reactive, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import type { CollectPoint, SporeColor, SporePrint } from '@/types'
+import type { SporeColor, SporePrint } from '@/types'
 import { SPORE_COLORS } from '@/types'
-import GeoPointForm from '@/components/common/GeoPointForm.vue'
 import GillAttachmentTag from '@/components/common/GillAttachmentTag.vue'
 import SporePrintSwatch from '@/components/common/SporePrintSwatch.vue'
 import TraitsSummary from '@/components/common/TraitsSummary.vue'
@@ -15,6 +14,7 @@ import { pointStore } from '@/stores/pointStore'
 import { identifyStore } from '@/stores/identifyStore'
 import { sporeColorHex } from '@/utils/spore'
 import { uid } from '@/utils/id'
+import { adoptedCoord, adoptStatus } from '@/utils/point'
 
 const route = useRoute()
 const router = useRouter()
@@ -32,6 +32,17 @@ const recordPointName = computed(() => {
   if (!current) return '未关联'
   return pointState.points.find((item) => item.id === current.pointId)?.name ?? '未关联'
 })
+/** 当前条目所属采集点（采用坐标与点位说明照整理组那份） */
+const currentPoint = computed(
+  () => pointState.points.find((item) => item.id === record.value?.pointId) ?? null
+)
+const pointStatus = computed(() => {
+  if (!currentPoint.value) return null
+  const status = adoptStatus(currentPoint.value)
+  if (status === 'adopted') return { label: '已采用', type: 'success' as const }
+  if (status === 'pending') return { label: '待重新采用', type: 'warning' as const }
+  return { label: '未采用', type: 'info' as const }
+})
 
 const sporeForm = reactive({
   id: '',
@@ -40,19 +51,6 @@ const sporeForm = reactive({
   hours: 12,
   observeDate: new Date().toISOString().slice(0, 10),
   moisture: ''
-})
-
-const pointDraft = reactive<CollectPoint>({
-  id: '',
-  name: '',
-  longitude: 0,
-  latitude: 0,
-  altitude: 0,
-  vegetation: '针阔混交林',
-  substrate: '落叶层',
-  companionTrees: '',
-  collectDate: '',
-  collector: ''
 })
 
 watch(
@@ -68,8 +66,6 @@ watch(
       sporeForm.observeDate = current.observeDate
       sporeForm.moisture = current.moisture
     }
-    const point = pointState.points.find((item) => item.id === record.value?.pointId)
-    if (point) Object.assign(pointDraft, point)
   },
   { immediate: true }
 )
@@ -88,15 +84,6 @@ async function saveSpore(): Promise<void> {
   await sporeStore.getState().save(row)
   sporeForm.id = row.id
   ElMessage.success(`孢子印观察已记录：${row.color}`)
-}
-
-async function savePoint(): Promise<void> {
-  if (!pointDraft.name.trim()) {
-    ElMessage.warning('采集点名称不能为空')
-    return
-  }
-  await pointStore.getState().save({ ...pointDraft })
-  ElMessage.success('采集点信息已更新')
 }
 
 async function removeSpore(): Promise<void> {
@@ -184,11 +171,40 @@ async function removeSpore(): Promise<void> {
       </el-card>
 
       <el-card shadow="never" class="block">
-        <template #header>采集点信息（含经纬度校验）</template>
-        <GeoPointForm v-model="pointDraft" with-meta />
-        <div class="form-actions">
-          <el-button type="primary" @click="savePoint">保存采集点</el-button>
-        </div>
+        <template #header>
+          <div class="block-head">
+            <span>采集点信息</span>
+            <el-tag v-if="pointStatus" :type="pointStatus.type" size="small" effect="dark">
+              {{ pointStatus.label }}
+            </el-tag>
+          </div>
+        </template>
+        <template v-if="currentPoint">
+          <el-descriptions :column="2" size="small" border>
+            <el-descriptions-item label="采集点名称">{{ currentPoint.name }}</el-descriptions-item>
+            <el-descriptions-item label="采用坐标">
+              <template v-if="adoptedCoord(currentPoint)">
+                {{ adoptedCoord(currentPoint)!.longitude.toFixed(4) }},
+                {{ adoptedCoord(currentPoint)!.latitude.toFixed(4) }} ·
+                {{ adoptedCoord(currentPoint)!.altitude }} m
+              </template>
+              <template v-else>未采用坐标</template>
+            </el-descriptions-item>
+            <el-descriptions-item label="植被类型">{{ currentPoint.vegetation }}</el-descriptions-item>
+            <el-descriptions-item label="基物">{{ currentPoint.substrate }}</el-descriptions-item>
+            <el-descriptions-item label="伴生树种">{{ currentPoint.companionTrees || '—' }}</el-descriptions-item>
+            <el-descriptions-item label="采集日期">{{ currentPoint.collectDate }}</el-descriptions-item>
+            <el-descriptions-item label="采集人">{{ currentPoint.collector || '—' }}</el-descriptions-item>
+            <el-descriptions-item label="野外读数">{{ currentPoint.readings.length }} 组</el-descriptions-item>
+            <el-descriptions-item label="点位说明" :span="2">{{ currentPoint.locationNote || '—' }}</el-descriptions-item>
+          </el-descriptions>
+          <div class="point-manage">
+            <el-button size="small" @click="router.push('/points')">
+              管理采集点（野外读数 / 采用坐标）
+            </el-button>
+          </div>
+        </template>
+        <el-empty v-else description="未关联采集点" :image-size="60" />
       </el-card>
 
       <el-card shadow="never" class="block">
@@ -275,5 +291,8 @@ async function removeSpore(): Promise<void> {
   display: flex;
   gap: 8px;
   padding-left: 92px;
+}
+.point-manage {
+  margin-top: 12px;
 }
 </style>
